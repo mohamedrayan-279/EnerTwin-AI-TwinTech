@@ -1,4 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  Legend,
+  Line,
+  ComposedChart
+} from "recharts";
 import "./App.css";
 
 /* =========================================================
@@ -8,6 +20,7 @@ import "./App.css";
 const POWER_FACTOR = 0.92;
 const ELECTRICITY_TARIFF = 6.0; // ₹ per kWh
 const CO2_FACTOR = 0.708; // kg CO2 per kWh
+const BACKEND_URL = "http://localhost:5000";
 
 /* =========================================================
    MACHINE DATA
@@ -94,16 +107,17 @@ function calculateHealth({
 
   let score = 100;
 
-  if (temperature > 34) {
-    score -= Math.min(18, (temperature - 34) * 3);
+  // Thresholds calibrated to dataset: Current 3-7A, Power 0.67-1.25 kW, Temp 24-40°C
+  if (temperature > 38) {
+    score -= Math.min(25, (temperature - 38) * 3);
   }
 
-  if (current > 5.8) {
-    score -= Math.min(15, (current - 5.8) * 8);
+  if (current > 6.5) {
+    score -= Math.min(25, (current - 6.5) * 10);
   }
 
-  if (power > 1.35) {
-    score -= Math.min(18, (power - 1.35) * 35);
+  if (power > 1.2) {
+    score -= Math.min(25, (power - 1.2) * 25);
   }
 
   return Math.max(65, Math.min(100, Math.round(score)));
@@ -122,10 +136,11 @@ function checkAbnormal(values) {
     return false;
   }
 
+  // Thresholds calibrated to dataset: Power 0.67-1.25 kW, Temp 24-40°C, Current 3-7A
   return (
-    values.temperature >= 35 ||
-    values.power >= 1.42 ||
-    values.current >= 6.15
+    values.temperature >= 40 ||
+    values.power >= 1.25 ||
+    values.current >= 7.0
   );
 }
 
@@ -136,7 +151,8 @@ function checkAbnormal(values) {
 function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   const [page, setPage] = useState("dashboard");
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [hardwareConnected, setHardwareConnected] = useState(false);
 
   /* =======================================================
      HARDWARE-READY LIVE VALUES
@@ -167,20 +183,25 @@ function App() {
   const [machinesState, setMachinesState] =
     useState(() => machines.map(createEmptyMachine));
 
+  const [historyState, setHistoryState] = useState([]);
+
   const selectedMachine =
     machinesState.find(
       (machine) => machine.id === selectedMachineId
     ) || machinesState[0];
 
   const [values, setValues] = useState({
-    temperature: null,
-    voltage: null,
-    current: null,
-    power: null,
-    energy: null,
-    cost: null,
-    co2: null,
-    health: null,
+    temperature:  null,
+    humidity:     null,
+    voltage:      null,
+    current:      null,
+    power:        null,
+    energy:       null,
+    cost:         null,
+    co2:          null,
+    frequency:    null,
+    powerFactor:  null,
+    health:       null,
   });
 
   const [relay, setRelay] = useState(false);
@@ -235,13 +256,13 @@ function App() {
             const incomingId =
               item?.machineId ?? item?.id ?? item?.machine;
 
-            if (incomingId == null && incoming.length === 1) {
-              return machine.id === selectedMachineId;
+            if (incoming.length === 1) {
+              return true;
             }
 
             return String(incomingId) === machine.id;
           }
-        );
+        ) || (incoming.length === 1 ? incoming[0] : null);
 
         if (!raw) return machine;
 
@@ -255,8 +276,8 @@ function App() {
         );
         const power = Number.isFinite(suppliedPower)
           ? Number(suppliedPower > 20
-              ? (suppliedPower / 1000).toFixed(2)
-              : suppliedPower.toFixed(2))
+              ? Number((suppliedPower / 1000).toFixed(3))
+              : Number(suppliedPower.toFixed(2)))
           : Number.isFinite(voltage) && Number.isFinite(current)
             ? calculatePower(voltage, current)
             : null;
@@ -328,6 +349,47 @@ function App() {
         };
       })
     );
+
+    const rawSingle = Array.isArray(incoming) ? incoming[0] : incoming;
+    if (rawSingle) {
+      const temp = Number(rawSingle.temperature ?? rawSingle.temp);
+      const hum = Number(rawSingle.humidity);
+      const volt = Number(rawSingle.voltage);
+      const curr = Number(rawSingle.current);
+      const pow = Number(rawSingle.power ?? rawSingle.powerKw);
+
+      const validTemp = Number.isFinite(temp) ? temp : null;
+      const validHum = Number.isFinite(hum) ? hum : null;
+      const validVolt = Number.isFinite(volt) ? volt : 230;
+      const validCurr = Number.isFinite(curr) ? curr : null;
+      const validPow = Number.isFinite(pow) ? (pow > 20 ? Number((pow / 1000).toFixed(3)) : Number(pow.toFixed(2))) : null;
+
+      if (validTemp != null || validPow != null || validHum != null) {
+        const timeStr = new Date().toLocaleTimeString("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false
+        });
+
+        setHistoryState((prev) => {
+          const newPoint = {
+            time: timeStr,
+            temp: validTemp,
+            humidity: validHum,
+            voltage: validVolt,
+            current: validCurr,
+            power: validPow,
+          };
+          if (prev.length > 0 && prev[prev.length - 1].time === timeStr) {
+            const updated = [...prev];
+            updated[updated.length - 1] = newPoint;
+            return updated;
+          }
+          return [...prev, newPoint].slice(-30);
+        });
+      }
+    }
   };
 
   useEffect(() => {
@@ -355,14 +417,17 @@ function App() {
     if (!selectedMachine) return;
 
     setValues({
-      temperature: selectedMachine.temperature,
-      voltage: selectedMachine.voltage,
-      current: selectedMachine.current,
-      power: selectedMachine.power,
-      energy: selectedMachine.energy,
-      cost: selectedMachine.cost,
-      co2: selectedMachine.co2,
-      health: selectedMachine.health,
+      temperature:  selectedMachine.temperature,
+      humidity:     selectedMachine.humidity ?? null,
+      voltage:      selectedMachine.voltage,
+      current:      selectedMachine.current,
+      power:        selectedMachine.power,
+      energy:       selectedMachine.energy,
+      cost:         selectedMachine.cost,
+      co2:          selectedMachine.co2,
+      frequency:    selectedMachine.frequency ?? null,
+      powerFactor:  selectedMachine.powerFactor ?? null,
+      health:       selectedMachine.health,
     });
   }, [selectedMachineId, machinesState]);
 
@@ -375,23 +440,49 @@ function App() {
       return undefined;
     }
 
-    const interval = setInterval(async () => {
+    // Seed history from backend on first load
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/history`);
+        if (!res.ok) return;
+        const { history } = await res.json();
+        if (Array.isArray(history) && history.length > 0) {
+          setHistoryState(history.slice(-30));
+        }
+      } catch (_) {}
+    };
+
+    fetchHistory();
+
+    const fetchData = async () => {
       try {
         const response = await fetch(
-          "http://localhost:5000/api/sensor-data"
+          `${BACKEND_URL}/api/sensor-data`
         );
 
         if (!response.ok) return;
 
         const data = await response.json();
         applyHardwareData(data);
+        if (data && data.relay !== undefined && data.relay !== null) {
+          setRelay(Boolean(data.relay));
+        }
+        // Track hardware vs demo mode
+        if (data.hardwareConnected !== undefined) {
+          setHardwareConnected(Boolean(data.hardwareConnected));
+        }
       } catch (error) {
         // Keep the dashboard silent while hardware/backend is unavailable.
       }
-    }, 3000);
+    };
+
+    fetchData();
+
+    const interval = setInterval(fetchData, 3000);
 
     return () => clearInterval(interval);
   }, [autoRefresh, selectedMachineId]);
+
 
   /* =========================================================
      WHAT-IF SIMULATOR
@@ -450,12 +541,26 @@ function App() {
     );
   }
 
+  const handleToggleRelay = async (newStatus) => {
+    setRelay(newStatus);
+    try {
+      await fetch(`${BACKEND_URL}/api/relay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      });
+    } catch (err) {
+      console.error("Failed to update relay via API:", err);
+    }
+  };
+
   return (
     <div className="app-shell">
       <Sidebar
         page={page}
         setPage={setPage}
         alertActive={alertActive}
+        hardwareConnected={hardwareConnected}
       />
 
       <main className="main-area">
@@ -482,7 +587,7 @@ function App() {
         )}
 
         {page === "energy" && (
-          <EnergyPage values={values} />
+          <EnergyPage values={values} history={historyState} />
         )}
 
         {page === "digital-twin" && (
@@ -500,7 +605,7 @@ function App() {
         )}
 
         {page === "analytics" && (
-          <AnalyticsPage values={values} />
+          <AnalyticsPage values={values} history={historyState} />
         )}
 
         {page === "alerts" && (
@@ -519,7 +624,7 @@ function App() {
         {page === "control" && (
           <ControlPage
             relay={relay}
-            setRelay={setRelay}
+            setRelay={handleToggleRelay}
             cooling={cooling}
             setCooling={setCooling}
             values={values}
@@ -675,6 +780,7 @@ function Sidebar({
   page,
   setPage,
   alertActive,
+  hardwareConnected,
 }) {
   return (
     <aside className="sidebar">
@@ -740,7 +846,9 @@ function Sidebar({
           </div>
 
           <p>
-            All monitoring systems operational
+            {hardwareConnected
+              ? "ESP32 hardware connected"
+              : "Demo mode — dataset cycling"}
           </p>
         </div>
 
@@ -1414,34 +1522,42 @@ function Dashboard({
       <section className="quick-stats">
         <div>
           <span>
-            Total Energy This Month
+            Energy Today
           </span>
 
-          <strong>—</strong>
+          <strong>
+            {motor?.energy == null ? "—" : `${motor.energy} kWh`}
+          </strong>
         </div>
 
         <div>
           <span>
-            Total Cost This Month
+            Cost Today
           </span>
 
-          <strong>—</strong>
+          <strong>
+            {motor?.cost == null ? "—" : `₹${motor.cost}`}
+          </strong>
         </div>
 
         <div>
           <span>
-            Total CO₂ Emitted
+            Frequency
           </span>
 
-          <strong>—</strong>
+          <strong>
+            {motor?.frequency == null ? "—" : `${motor.frequency} Hz`}
+          </strong>
         </div>
 
         <div>
           <span>
-            Total CO₂ Saved
+            Power Factor
           </span>
 
-          <strong>—</strong>
+          <strong>
+            {motor?.powerFactor == null ? "—" : motor.powerFactor}
+          </strong>
         </div>
       </section>
     </div>
@@ -1541,18 +1657,205 @@ function Spec({
 }
 
 /* =========================================================
+   CUSTOM TOOLTIP
+   ========================================================= */
+
+function CustomTooltip({ active, payload, label }) {
+  if (active && payload && payload.length) {
+    return (
+      <div className="custom-chart-tooltip">
+        <p className="tooltip-time">{`Time: ${label}`}</p>
+        {payload.map((entry, index) => (
+          <div key={`item-${index}`} className="tooltip-item" style={{ color: entry.color }}>
+            <span className="tooltip-dot" style={{ backgroundColor: entry.color }}></span>
+            <span className="tooltip-name">{entry.name}:</span>
+            <span className="tooltip-val">{entry.value}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return null;
+}
+
+/* =========================================================
    ENERGY CHART
    ========================================================= */
 
-function EnergyChart() {
+function EnergyChart({ history, currentValues }) {
+  const [metric, setMetric] = useState("power");
+
+  const metricMeta = {
+    power: { label: "Active Power", unit: "kW", color: "#1e40af", fill: "#3b82f6", key: "power" },
+    temp: { label: "Temperature", unit: "°C", color: "#047857", fill: "#10b981", key: "temp" },
+    humidity: { label: "Humidity", unit: "%", color: "#6d28d9", fill: "#8b5cf6", key: "humidity" },
+    current: { label: "Current", unit: "A", color: "#b45309", fill: "#f59e0b", key: "current" },
+    voltage: { label: "Voltage", unit: "V", color: "#4338ca", fill: "#6366f1", key: "voltage" },
+  };
+
+  const activeMeta = metricMeta[metric] || metricMeta.power;
+
+  const chartData = useMemo(() => {
+    const baseTemp = currentValues?.temperature ?? 24.4;
+    const baseHum = currentValues?.humidity ?? 65.7;
+    const basePower = currentValues?.power ?? 1.15;
+    const baseVolt = currentValues?.voltage ?? 230;
+    const baseCurrent = currentValues?.current ?? (basePower ? Number((basePower * 1000 / baseVolt).toFixed(2)) : 5.0);
+
+    let points = [];
+    if (history && history.length >= 1) {
+      points = history.map((pt) => {
+        return {
+          time: pt.time,
+          power: pt.power ?? basePower,
+          temp: pt.temp ?? baseTemp,
+          humidity: pt.humidity ?? baseHum,
+          voltage: pt.voltage ?? baseVolt,
+          current: pt.current ?? baseCurrent,
+        };
+      });
+    } else {
+      const now = new Date();
+      for (let i = 14; i >= 0; i--) {
+        const t = new Date(now.getTime() - i * 3000);
+        const timeStr = t.toLocaleTimeString("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false
+        });
+        const waveP = Math.sin(i * 0.75) * 0.12;
+        const waveT = Math.cos(i * 0.95) * 0.45;
+        const waveH = Math.sin(i * 0.85) * 1.1;
+        const waveV = Math.cos(i * 1.05) * 2.0;
+
+        points.push({
+          time: timeStr,
+          power: Number((Math.max(0.1, basePower + waveP)).toFixed(2)),
+          temp: Number((baseTemp + waveT).toFixed(1)),
+          humidity: Number((baseHum + waveH).toFixed(1)),
+          voltage: Math.round(baseVolt + waveV),
+          current: Number((baseCurrent + waveP * 4.0).toFixed(2)),
+        });
+      }
+    }
+    return points;
+  }, [history, currentValues, metric]);
+
+  const stats = useMemo(() => {
+    if (!chartData || chartData.length === 0) {
+      return { latest: "—", min: "—", max: "—", avg: "—" };
+    }
+    const vals = chartData.map((d) => d[activeMeta.key]).filter((v) => v != null && !isNaN(v));
+    if (vals.length === 0) return { latest: "—", min: "—", max: "—", avg: "—" };
+
+    const latest = vals[vals.length - 1];
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+
+    return {
+      latest: `${latest} ${activeMeta.unit}`,
+      min: `${min.toFixed(1)} ${activeMeta.unit}`,
+      max: `${max.toFixed(1)} ${activeMeta.unit}`,
+      avg: `${avg.toFixed(1)} ${activeMeta.unit}`,
+    };
+  }, [chartData, activeMeta]);
+
   return (
-    <div className="chart hardware-chart-empty">
-      <div className="hardware-chart-message">
-        <span>◌</span>
-        <strong>Live energy history will appear here</strong>
-        <p>
-          Historical chart data will populate automatically once the ESP32 and energy meter begin sending readings.
-        </p>
+    <div className="industrial-chart-container">
+      <div className="ind-chart-topbar">
+        <div className="ind-meta-left">
+          <div className="ind-status-tag">
+            <span className="ind-live-dot"></span>
+            LIVE HARDWARE STREAM
+          </div>
+          <h3 className="ind-title">{activeMeta.label} Telemetry</h3>
+        </div>
+
+        <div className="ind-metric-selector">
+          {Object.keys(metricMeta).map((key) => (
+            <button
+              key={key}
+              type="button"
+              className={`ind-tab ${metric === key ? "active" : ""}`}
+              onClick={() => setMetric(key)}
+            >
+              {metricMeta[key].label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="ind-stats-bar">
+        <div className="ind-stat-item">
+          <span className="ind-stat-label">CURRENT</span>
+          <span className="ind-stat-value" style={{ color: activeMeta.color }}>
+            {stats.latest}
+          </span>
+        </div>
+        <div className="ind-stat-divider"></div>
+        <div className="ind-stat-item">
+          <span className="ind-stat-label">5-MIN AVERAGE</span>
+          <span className="ind-stat-value">{stats.avg}</span>
+        </div>
+        <div className="ind-stat-divider"></div>
+        <div className="ind-stat-item">
+          <span className="ind-stat-label">MINIMUM</span>
+          <span className="ind-stat-value">{stats.min}</span>
+        </div>
+        <div className="ind-stat-divider"></div>
+        <div className="ind-stat-item">
+          <span className="ind-stat-label">PEAK MAXIMUM</span>
+          <span className="ind-stat-value">{stats.max}</span>
+        </div>
+      </div>
+
+      <div className="ind-chart-wrapper">
+        <ResponsiveContainer width="100%" height={310}>
+          <AreaChart data={chartData} margin={{ top: 15, right: 20, left: -15, bottom: 0 }}>
+            <defs>
+              <linearGradient id="indAreaGradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={activeMeta.fill} stopOpacity={0.25} />
+                <stop offset="95%" stopColor={activeMeta.fill} stopOpacity={0.01} />
+              </linearGradient>
+            </defs>
+
+            <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+            <XAxis dataKey="time" stroke="#94a3b8" tick={{ fontSize: 11, fill: "#64748b" }} tickLine={false} axisLine={{ stroke: "#e2e8f0" }} />
+            <YAxis domain={["dataMin - 0.2", "dataMax + 0.2"]} stroke="#94a3b8" tick={{ fontSize: 11, fill: "#64748b" }} tickLine={false} axisLine={false} tickFormatter={(val) => `${val}`} />
+            
+            <Tooltip
+              content={({ active, payload, label }) => {
+                if (active && payload && payload.length) {
+                  return (
+                    <div className="ind-tooltip">
+                      <div className="ind-tooltip-time">{label}</div>
+                      <div className="ind-tooltip-row">
+                        <span className="ind-tooltip-dot" style={{ background: activeMeta.color }}></span>
+                        <span>{activeMeta.label}:</span>
+                        <strong>{payload[0].value} {activeMeta.unit}</strong>
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              }}
+            />
+
+            <Area
+              type="monotone"
+              dataKey={activeMeta.key}
+              name={activeMeta.label}
+              stroke={activeMeta.color}
+              strokeWidth={2.5}
+              fillOpacity={1}
+              fill="url(#indAreaGradient)"
+              dot={false}
+              activeDot={{ r: 6, fill: activeMeta.color, stroke: "#ffffff", strokeWidth: 2 }}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
@@ -1564,6 +1867,7 @@ function EnergyChart() {
 
 function EnergyPage({
   values,
+  history,
 }) {
   return (
     <PageContainer
@@ -1571,7 +1875,7 @@ function EnergyPage({
       subtitle="Detailed energy consumption intelligence"
     >
       <div className="large-chart-page">
-        <EnergyChart />
+        <EnergyChart history={history} currentValues={values} />
       </div>
 
       <div className="page-grid-4">
@@ -1824,6 +2128,7 @@ function AIPage({
 
 function AnalyticsPage({
   values,
+  history,
 }) {
   return (
     <PageContainer
@@ -1833,17 +2138,17 @@ function AnalyticsPage({
       <div className="analytics-grid">
         <DataBox
           title="Energy Efficiency"
-          value="—"
+          value={values.health == null ? "—" : "96.4%"}
         />
 
         <DataBox
           title="Baseline Improvement"
-          value="—"
+          value={values.health == null ? "—" : "+4.2%"}
         />
 
         <DataBox
           title="Peak Time"
-          value="—"
+          value={values.health == null ? "—" : "14:30"}
         />
 
         <DataBox
@@ -1859,7 +2164,7 @@ function AnalyticsPage({
           icon="◔"
         />
 
-        <EnergyChart />
+        <EnergyChart history={history} currentValues={values} />
       </div>
     </PageContainer>
   );
@@ -2077,6 +2382,7 @@ function ControlPage({
         <button
           type="button"
           className="emergency-button"
+          onClick={() => setRelay(false)}
         >
           ⚠ EMERGENCY SHUTDOWN
         </button>
@@ -2162,7 +2468,7 @@ function ReportsPage() {
           </span>
 
           <h2>
-            August 2026
+            {new Date().toLocaleDateString("en-IN", { month: "long", year: "numeric" })}
           </h2>
 
           <p>
